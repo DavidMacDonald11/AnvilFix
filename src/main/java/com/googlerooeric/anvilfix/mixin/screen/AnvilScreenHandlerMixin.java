@@ -1,11 +1,11 @@
 package com.googlerooeric.anvilfix.mixin.screen;
 
+import com.googlerooeric.anvilfix.AnvilData;
 import com.googlerooeric.anvilfix.AnvilFix;
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.player.PlayerInventory;
-import net.minecraft.item.EnchantedBookItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.screen.*;
@@ -82,7 +82,6 @@ public abstract class AnvilScreenHandlerMixin extends ForgingScreenHandler {
     @Overwrite
     public void updateResult() {
         var item = this.input.getStack(0);
-        var totalCost = 0;
 
         if(item.isEmpty()) {
             this.output.setStack(0, ItemStack.EMPTY);
@@ -92,138 +91,115 @@ public abstract class AnvilScreenHandlerMixin extends ForgingScreenHandler {
 
         this.repairItemUsage = 0;
         var modifier = this.input.getStack(1);
-        var result = item.copy();
+        var data = new AnvilData(item, modifier);
 
         if(!modifier.isEmpty()) {
-            totalCost += repairAndEnchantItem(item, modifier, result);
+            repairAndEnchantItem(data);
         }
 
-        totalCost += renameItem(item, result, modifier.isEmpty(), totalCost);
-        setFinalResult(totalCost, result);
+        renameItem(data);
+        setFinalResult(data);
     }
 
     @Unique
-    private int repairAndEnchantItem(ItemStack item, ItemStack modifier, ItemStack result) {
-        if(canItemBeRepairedByModifier(item, modifier)) {
-            return repairItem(item, modifier, result);
+    private void repairAndEnchantItem(AnvilData data) {
+        if(data.canItemBeRepairedByModifier()) {
+            repairItem(data);
+            return;
         }
 
-        var itemIsBook = isItemAnEnchantedBook(item);
-        var modifierIsBook = isItemAnEnchantedBook(modifier);
+        var itemIsEnchantedBook = data.item.isOf(Items.ENCHANTED_BOOK);
+        var modifierIsEnchantedBook = data.modifier.isOf(Items.ENCHANTED_BOOK);
 
-        if(!itemIsBook && !modifierIsBook) {
-            return mergeItems(item, modifier, result);
+        if(!itemIsEnchantedBook && !modifierIsEnchantedBook) {
+            mergeItems(data);
+        } else if(modifierIsEnchantedBook) {
+            addEnchantsToItem(data);
         }
-
-        if(modifierIsBook) {
-            return addEnchantsToItem(item, modifier, result);
-        }
-
-        return 0;
     }
 
     @Unique
-    private int renameItem(ItemStack item, ItemStack result, boolean modifierIsEmpty, int cost) {
-        if(!modifierIsEmpty && cost == 0) { return 0; }
+    private void renameItem(AnvilData data) {
+        if(!data.modifier.isEmpty() && data.cost == 0) { return; }
 
         if(StringUtils.isBlank(this.newItemName) || this.newItemName == null) {
-            if(item.hasCustomName()) {
-                result.removeCustomName();
-                return 2;
+            if(data.item.hasCustomName()) {
+                data.result.removeCustomName();
+                data.cost += 2;
             }
 
-            return 0;
+            return;
         }
 
-        if(this.newItemName.equals(item.getName().getString())) { return 0; }
-
-        result.setCustomName(Text.literal(this.newItemName));
-        return 2;
+        if(!this.newItemName.equals(data.item.getName().getString())) {
+            data.result.setCustomName(Text.literal(this.newItemName));
+            data.cost += 2;
+        }
     }
 
     @Unique
-    private void setFinalResult(int totalCost,  ItemStack result) {
-        if(totalCost == 0) {
-            result = ItemStack.EMPTY;
-        }
+    private void setFinalResult(AnvilData data) {
+        var result = (data.cost == 0)? ItemStack.EMPTY : data.result;
 
-        this.levelCost.set(totalCost);
+        this.levelCost.set(data.cost);
         this.output.setStack(0, result);
         this.sendContentUpdates();
     }
 
     @Unique
-    private static boolean canItemBeRepairedByModifier(ItemStack first, ItemStack second) {
-        return first.isDamageable() && first.getItem().canRepair(first, second);
-    }
-
-    @Unique
-    private static boolean isItemAnEnchantedBook(ItemStack item) {
-        return item.isOf(Items.ENCHANTED_BOOK) && !EnchantedBookItem.getEnchantmentNbt(item).isEmpty();
-    }
-
-    @Unique
-    private int repairItem(ItemStack item, ItemStack modifier, ItemStack result) {
-        var damage = item.getDamage();
-        var damageReductionPerRepair = item.getMaxDamage() / 4;
+    private void repairItem(AnvilData data) {
+        var damage = data.item.getDamage();
+        var damageReductionPerRepair = data.item.getMaxDamage() / 4;
 
         var desiredRepairs = (int)Math.ceil((double)damage / damageReductionPerRepair);
-        var possibleRepairs = modifier.getCount();
+        var possibleRepairs = data.modifier.getCount();
         var repairs = Math.min(desiredRepairs, possibleRepairs);
 
         var maxDamageReduction = repairs * damageReductionPerRepair;
         var damageReduction = Math.min(damage, maxDamageReduction);
 
-        result.setDamage(damage - damageReduction);
+        data.result.setDamage(damage - damageReduction);
+        data.cost += 2 * repairs;
         this.repairItemUsage = repairs;
-
-        return 2 * repairs;
     }
 
     @Unique
-    private int mergeItems(ItemStack item, ItemStack modifier, ItemStack result) {
-        if(!ItemStack.areItemsEqualIgnoreDamage(item, modifier)) { return 0; }
-        var totalCost = addEnchantsToItem(item, modifier, result);
+    private void mergeItems(AnvilData data) {
+        if(!ItemStack.areItemsEqualIgnoreDamage(data.item, data.modifier)) { return; }
+        addEnchantsToItem(data);
 
-        var maxHealth = item.getMaxDamage();
-        var itemHealth = maxHealth - item.getDamage();
-        var modifierHealth = maxHealth - modifier.getDamage();
+        var maxHealth = data.item.getMaxDamage();
+        var itemHealth = maxHealth - data.item.getDamage();
+        var modifierHealth = maxHealth - data.modifier.getDamage();
 
         if(itemHealth != maxHealth) {
             var combinedHealth = (int)(itemHealth + modifierHealth + maxHealth * .12);
             var newHealth = Math.min(maxHealth, combinedHealth);
 
-            result.setDamage(maxHealth - newHealth);
-            totalCost += 2;
+            data.result.setDamage(maxHealth - newHealth);
+            data.cost += 2;
         }
-
-        return totalCost;
     }
 
     @Unique
-    private int addEnchantsToItem(ItemStack item, ItemStack modifier, ItemStack result) {
-        var enchants = new HashMap<>(EnchantmentHelper.get(item));
+    private void addEnchantsToItem(AnvilData data) {
+        var enchants = new HashMap<>(EnchantmentHelper.get(data.item));
 
-        var itemIsBook = isItemAnEnchantedBook(item);
-        var newEnchants = EnchantmentHelper.get(modifier);
-        var totalCost = 0;
+        var itemIsBook = data.item.isOf(Items.BOOK) || data.item.isOf(Items.ENCHANTED_BOOK);
+        var newEnchants = EnchantmentHelper.get(data.modifier);
 
         for(var newEnchant : newEnchants.keySet()) {
-            if(!itemIsBook && !newEnchant.isAcceptableItem(item)) {
-                continue;
-            }
-
+            if(!itemIsBook && !newEnchant.isAcceptableItem(data.item)) { continue; }
             int newLevel = newEnchants.get(newEnchant);
 
             if(enchants.containsKey(newEnchant)) {
-                totalCost += mergeEnchantmentLevels(enchants, newEnchant, newLevel);
+                data.cost += mergeEnchantmentLevels(enchants, newEnchant, newLevel);
             } else {
-                totalCost += addNewEnchantment(enchants, newEnchant, newLevel);
+                data.cost += addNewEnchantment(enchants, newEnchant, newLevel);
             }
         }
 
-        EnchantmentHelper.set(enchants, result);
-        return totalCost;
+        EnchantmentHelper.set(enchants, data.result);
     }
 
     @Unique
